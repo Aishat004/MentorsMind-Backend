@@ -100,6 +100,7 @@ const envSchema = z.object({
   GMAIL_USER: z.string().optional(),
   GMAIL_PASS: z.string().optional(),
   FROM_EMAIL: z.string().email().default("noreply@mentorminds.com"),
+  ADMIN_ALERT_EMAIL: z.string().email().optional(),
 
   // Email provider selection: sendgrid | mailgun | smtp (default: smtp)
   EMAIL_PROVIDER: z.enum(["sendgrid", "mailgun", "smtp"]).default("smtp"),
@@ -424,7 +425,19 @@ function performSecurityValidation(env: Record<string, any>) {
 }
 
 function validateEnv() {
-  const result = envSchema.safeParse(process.env);
+  let result = envSchema.safeParse(process.env);
+
+  if (
+    !result.success &&
+    result.error.issues.some((issue) => issue.path[0] === "ADMIN_ALERT_EMAIL")
+  ) {
+    process.stderr.write(
+      "Warning: ADMIN_ALERT_EMAIL is invalid; backup alert emails are disabled.\n",
+    );
+    const envWithoutInvalidAdminEmail = { ...process.env };
+    delete envWithoutInvalidAdminEmail.ADMIN_ALERT_EMAIL;
+    result = envSchema.safeParse(envWithoutInvalidAdminEmail);
+  }
 
   if (!result.success) {
     const formatted = result.error.issues
