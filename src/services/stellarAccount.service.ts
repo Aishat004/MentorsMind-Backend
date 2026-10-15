@@ -10,8 +10,32 @@ import { withRetry } from "../utils/stellar.utils";
 import { logger } from "../utils/logger.utils";
 import pool from "../config/database";
 import { SocketService } from "./socket.service";
+import { createError } from "../middleware/errorHandler";
+import { ErrorCode } from "../errors/error-codes";
+import { env } from "../config/env";
 
 const STARTING_BALANCE = "1.5";
+
+/**
+ * Wraps server.loadAccount() with a configurable timeout so a slow or
+ * unreachable Horizon node fails fast instead of hanging indefinitely.
+ * Throws a typed SERVICE_UNAVAILABLE AppError when the deadline is exceeded.
+ */
+async function loadAccountWithTimeout(accountId: string): Promise<Awaited<ReturnType<typeof server.loadAccount>>> {
+  const timeoutMs = parseInt(env.STELLAR_REQUEST_TIMEOUT_MS, 10);
+
+  const timeoutPromise = new Promise<never>((_, reject) =>
+    setTimeout(() => {
+      reject(
+        createError(ErrorCode.SERVICE_UNAVAILABLE, 503, {
+          reason: `Stellar Horizon request timed out after ${timeoutMs}ms`,
+        }),
+      );
+    }, timeoutMs),
+  );
+
+  return Promise.race([server.loadAccount(accountId), timeoutPromise]);
+}
 
 export const StellarAccountService = {
   async createAndFundWallet(userId: string) {
@@ -41,10 +65,13 @@ export const StellarAccountService = {
 
   async fundAccount(userId: string, destination: string) {
     const platform = getPlatformKeypair();
-    if (!platform) throw new Error("Funding account not configured");
+    if (!platform)
+      throw createError(ErrorCode.SERVICE_UNAVAILABLE, 503, {
+        reason: "Stellar funding account not configured",
+      });
 
     return withRetry(async () => {
-      const account = await server.loadAccount(platform.publicKey());
+      const account = await loadAccountWithTimeout(platform.publicKey());
 
       const balance = account.balances.find((b) => b.asset_type === "native");
 
