@@ -1,9 +1,9 @@
-import { Response } from 'express';
-import { AuthenticatedRequest } from '../types/api.types';
+﻿import { Response } from 'express';
+import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { CDNHealthService } from '../services/cdn-health.service';
 import { CDNService } from '../services/cdn.service';
 import { ResponseUtil } from '../utils/response.utils';
-import { logger } from '../utils/logger';
+import { Logger } from "../utils/logger.utils";
 
 /**
  * Admin controllers for CDN health monitoring and management.
@@ -24,12 +24,13 @@ export const CDNAdminController = {
 
       const metrics = await CDNHealthService.getHealthStatus(config.domains);
 
-      ResponseUtil.success(res, metrics, 'CDN health status retrieved successfully', 200, {
+      ResponseUtil.success(res, {
+        ...metrics,
         provider: config.provider,
         domainCount: config.domains.length,
         healthyCount: Object.values(metrics).filter((m) => m.healthy).length,
         circuitOpenCount: Object.values(metrics).filter((m) => m.circuitOpen).length,
-      });
+      }, 'CDN health status retrieved successfully', 200);
     } catch (error) {
       logger.error('Failed to get CDN health status', {
         error: error instanceof Error ? error.message : 'Unknown error',

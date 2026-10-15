@@ -18,7 +18,7 @@
 import { Response } from "express";
 import { z } from "zod";
 import pool from "../config/database";
-import { AuthenticatedRequest } from "../types/api.types";
+import { AuthenticatedRequest } from "../middleware/auth.middleware";
 import { ResponseUtil } from "../utils/response.utils";
 import { anonymizeIp } from "../utils/sanitization.utils";
 
@@ -370,6 +370,8 @@ export const ConsentController = {
           page,
           limit,
           totalPages: Math.ceil(total / limit),
+          hasNext: page < Math.ceil(total / limit),
+          hasPrev: page > 1,
         },
       );
     } catch (error) {

@@ -1,8 +1,8 @@
-import { Response } from 'express';
-import { AuthenticatedRequest } from '../types/api.types';
+﻿import { Response } from 'express';
+import { AuthenticatedRequest } from '../middleware/auth.middleware';
 import { EventReplayService, ReplayProgress } from '../services/event-replay.service';
 import { ResponseUtil } from '../utils/response.utils';
-import { logger } from '../utils/logger';
+import { Logger } from "../utils/logger.utils";
 
 /**
  * Admin controllers for event store replay and recovery operations.
@@ -115,15 +115,15 @@ export const EventReplayAdminController = {
 
       ResponseUtil.success(
         res,
-        progress,
-        'Replay progress retrieved successfully',
-        200,
         {
+          ...progress,
           percentComplete,
           eta: progress.estimatedSecondsRemaining
             ? `${progress.estimatedSecondsRemaining}s`
             : 'calculating',
         },
+        'Replay progress retrieved successfully',
+        200,
       );
     } catch (error) {
       logger.error('Failed to get replay status', {

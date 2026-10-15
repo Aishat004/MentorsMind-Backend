@@ -11,6 +11,7 @@ import { handleTokenRefresh } from "../middleware/token-refresh.middleware";
 import { asyncHandler } from "../utils/asyncHandler.utils";
 import { loginLockoutCheck } from "../middleware/rate-limit.middleware";
 import { validate } from "../middleware/validation.middleware";
+import { noCacheMiddleware } from "../middleware/no-cache.middleware";
 import {
   registerSchema,
   loginSchema,
@@ -30,6 +31,9 @@ import {
 } from "../validators/schemas/auth.schemas";
 
 const router = Router();
+
+// Disable caching for all authentication endpoints
+router.use(noCacheMiddleware);
 
 // Apply stricter rate limiting for auth endpoints to prevent brute force attacks
 const authLimiter = rateLimit({
@@ -167,5 +171,43 @@ router.delete(
 
 // JWKS endpoint
 router.get("/jwks", asyncHandler(JwksController.getJwks));
+
+// ── WebAuthn / Passkey routes ─────────────────────────────────────────────
+
+// Registration flow (authenticated user adding a new passkey)
+router.post(
+  "/passkey/register/begin",
+  authenticate,
+  asyncHandler(AuthController.passkeyRegisterBegin),
+);
+router.post(
+  "/passkey/register/complete",
+  authenticate,
+  asyncHandler(AuthController.passkeyRegisterComplete),
+);
+
+// Authentication flow (public — rate limited to prevent abuse)
+router.post(
+  "/passkey/auth/begin",
+  authLimiter,
+  asyncHandler(AuthController.passkeyAuthBegin),
+);
+router.post(
+  "/passkey/auth/complete",
+  authLimiter,
+  asyncHandler(AuthController.passkeyAuthComplete),
+);
+
+// Device management (authenticated)
+router.get(
+  "/passkey/devices",
+  authenticate,
+  asyncHandler(AuthController.listPasskeyDevices),
+);
+router.delete(
+  "/passkey/devices/:id",
+  authenticate,
+  asyncHandler(AuthController.removePasskeyDevice),
+);
 
 export default router;
