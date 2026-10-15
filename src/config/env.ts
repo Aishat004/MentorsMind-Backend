@@ -109,6 +109,11 @@ const envSchema = z.object({
   PLATFORM_SECRET_KEY: z.string().optional(),
   /** Public key of the HSM-provisioned platform Stellar key (issue #982) */
   STELLAR_FUNDING_PUBLIC_KEY: z.string().optional(),
+  /** Timeout in ms for Stellar Horizon HTTP requests (issue #1215) */
+  STELLAR_REQUEST_TIMEOUT_MS: z
+    .string()
+    .regex(/^\d+$/, "STELLAR_REQUEST_TIMEOUT_MS must be a non-negative integer")
+    .default("10000"),
 
   // CORS
   CORS_ORIGIN: z
