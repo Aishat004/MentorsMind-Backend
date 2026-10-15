@@ -5,6 +5,13 @@
 jest.mock("../../services/sunset-exemption.service", () => ({
   SunsetExemptionService: { isExempt: jest.fn().mockResolvedValue(false) },
 }));
+jest.mock("../../services/cache.service", () => ({
+  CacheService: {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn(),
+    del: jest.fn(),
+  },
+}));
 jest.mock("../../config/metrics", () => ({
   deprecatedApiCallsTotal: { inc: jest.fn() },
 }));
@@ -45,7 +52,11 @@ interface RunResult {
 const runMiddleware = async (
   headers: Record<string, string> = {},
 ): Promise<RunResult> => {
-  const req = { path: "/api/v1/users", headers } as unknown as Request;
+  const req = {
+    path: "/api/v1/users",
+    headers,
+    get: jest.fn().mockReturnValue(undefined),
+  } as unknown as Request;
   const res = {
     status: jest.fn().mockReturnThis(),
     setHeader: jest.fn().mockReturnThis(),
