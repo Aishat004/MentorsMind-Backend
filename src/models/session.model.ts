@@ -7,6 +7,7 @@ import {
   withTenantFilter,
   withCurrentTenantFilter,
 } from "../utils/tenant-context.utils";
+import { createError } from "../middleware/errorHandler";
 
 export interface Session {
   id: string;
@@ -235,6 +236,19 @@ export const SessionModel = {
     id: string,
     payload: UpdateMeetingUrlPayload,
   ): Promise<SessionRecord | null> {
+    const { meetingUrl } = payload;
+
+    // Validate meeting URL - must be valid URL or null/empty to clear it
+    if (meetingUrl !== null && meetingUrl !== '') {
+      try {
+        new URL(meetingUrl);
+      } catch {
+        throw createError(ErrorCode.VALIDATION_ERROR, 400, {
+          message: 'meetingUrl must be a valid URL',
+        });
+      }
+    }
+
     const { query, params } = withCurrentTenantFilter(
       `UPDATE sessions
        SET
@@ -245,7 +259,7 @@ export const SessionModel = {
          updated_at = NOW()
        WHERE id = $5`,
       [
-        payload.meetingUrl,
+        meetingUrl,
         payload.meetingProvider,
         payload.meetingRoomId,
         payload.meetingExpiresAt,

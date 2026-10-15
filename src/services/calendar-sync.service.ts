@@ -113,13 +113,14 @@ export class CalendarSyncService {
     let eventsUpdated = 0;
     let eventsDeleted = 0;
 
-    // Placeholder sync logic
+    // Check each event for duplicates
     for (const event of events) {
       const exists = await this.eventExists(userId, event.id);
       if (exists) {
         eventsUpdated++;
       } else {
         eventsAdded++;
+        // Code to insert event would go here
       }
     }
 
@@ -127,8 +128,12 @@ export class CalendarSyncService {
   }
 
   private async eventExists(userId: string, eventId: string): Promise<boolean> {
-    // Placeholder implementation
-    return false;
+    // Query the calendar_sync_events table to check if event already exists
+    const { rows } = await db.query(
+      `SELECT id FROM calendar_sync_events WHERE user_id = $1 AND external_id = $2`,
+      [userId, eventId],
+    );
+    return rows.length > 0;
   }
 }
 
