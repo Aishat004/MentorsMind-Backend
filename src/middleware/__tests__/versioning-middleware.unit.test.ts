@@ -20,7 +20,13 @@
 jest.mock("../../services/sunset-exemption.service", () => ({
   SunsetExemptionService: { isExempt: jest.fn().mockResolvedValue(false) },
 }));
-
+jest.mock("../../services/cache.service", () => ({
+  CacheService: {
+    get: jest.fn().mockResolvedValue(null),
+    set: jest.fn(),
+    del: jest.fn(),
+  },
+}));
 jest.mock("../../config/metrics", () => ({
   deprecatedApiCallsTotal: { inc: jest.fn() },
 }));
@@ -80,11 +86,9 @@ const runMiddleware = async (
   headers: Record<string, string> = {},
 ): Promise<RunResult> => {
   const req = {
-    path,
+    path: "/api/v1/users",
     headers,
-    ip: "127.0.0.1",
-    // Express req.get() looks up a header by name
-    get: (name: string) => headers[name.toLowerCase()],
+    get: jest.fn().mockReturnValue(undefined),
   } as unknown as Request;
   const res = {
     status: jest.fn().mockReturnThis(),
