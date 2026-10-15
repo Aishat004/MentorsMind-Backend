@@ -379,17 +379,12 @@ export const SessionModel = {
       RETURNING id;
     `;
 
-    try {
-      const { rowCount } = await pool.query(moveQuery, [years]);
-      const moved = rowCount ?? 0;
-      if (moved > 0) {
-        logger.info("SessionModel: archived old sessions", { years, moved });
-      }
-      return moved;
-    } catch (error) {
-      logger.error("Failed to archive old sessions:", error);
-      return 0;
+    const { rowCount } = await pool.query(moveQuery, [years]);
+    const moved = rowCount ?? 0;
+    if (moved > 0) {
+      logger.info("SessionModel: archived old sessions", { years, moved });
     }
+    return moved;
   },
 };
 

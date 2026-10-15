@@ -123,6 +123,9 @@ export const BookingModel = {
       `SELECT *, COUNT(*) OVER() AS total_count FROM bookings WHERE ${whereClause}`,
       baseParams,
     );
+    // finalParamIndex is computed after the tenant filter adds its parameter,
+    // so LIMIT $${finalParamIndex} OFFSET $${finalParamIndex + 1} correctly
+    // references the limit and offset parameters appended at the end.
     const finalParamIndex = filteredParams.length + 1;
 
     const dataResult = await db.query(
