@@ -37,6 +37,22 @@ export class CalendarSyncService {
     }
   }
 
+  /**
+   * Stops all active sync intervals. Called during graceful shutdown to
+   * ensure no orphaned timers remain after SIGTERM/SIGINT is received.
+   */
+  stopAllSyncs(): void {
+    const userIds = Array.from(this.syncIntervals.keys());
+    for (const userId of userIds) {
+      const interval = this.syncIntervals.get(userId);
+      if (interval) {
+        clearInterval(interval);
+        this.syncIntervals.delete(userId);
+      }
+    }
+    logger.info({ count: userIds.length }, "Stopped all calendar syncs");
+  }
+
   async performSync(userId: string): Promise<SyncStatus> {
     logger.debug({ userId }, "Performing calendar sync");
 
@@ -133,3 +149,11 @@ export class CalendarSyncService {
 }
 
 export const calendarSyncService = new CalendarSyncService();
+
+/**
+ * Standalone export for use in server.ts shutdown sequence.
+ * Delegates to the singleton instance's stopAllSyncs() method.
+ */
+export function stopAllSyncs(): void {
+  calendarSyncService.stopAllSyncs();
+}
