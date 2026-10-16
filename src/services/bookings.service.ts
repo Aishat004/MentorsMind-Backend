@@ -24,8 +24,12 @@ import { SessionSummaryModel } from "../models/session-summary.model";
 import { MentorsService } from "./mentors.service";
 import { LoyaltyService } from "./loyalty.service";
 import { scheduleNoShowCheck } from "../queues/session-no-show.queue";
+import { scheduleReputationSync } from "../queues/reputation-sync.queue";
 import config from "../config";
+import { withSpan } from "../utils/tracing.utils";
 import { EventStoreService } from "./event-store.service";
+import { DatabaseService } from "./database.service";
+import { emitBookingConfirmed } from "./outbox.service";
 import {
   BOOKING_AGGREGATE_TYPE,
   BookingProjectionEventType,
@@ -113,113 +117,158 @@ function isCancelledBeforeSession(booking: BookingRecord): boolean {
   return booking.scheduled_at > new Date();
 }
 
+let bookingsServiceInitialized = false;
+
 export const BookingsService = {
   /**
    * Initialize bookings service (starts background monitoring only).
    * Table schema is managed by migrations, not runtime DDL.
+   * Idempotent — safe to call multiple times.
    */
   async initialize(): Promise<void> {
+    if (bookingsServiceInitialized) {
+      logger.info("BookingsService already initialized, skipping");
+      return;
+    }
+    bookingsServiceInitialized = true;
     // Start pending escrow monitoring (background job)
     SorobanEscrowService.startPendingEscrowMonitoring();
   },
 
   async createBooking(data: CreateBookingData): Promise<BookingRecord> {
-    // Batch-validate both users in a single query (avoids N+1)
-    const { rows: users } = await db.query(
-      `SELECT id, role, status FROM users WHERE id = ANY($1) AND is_active = true`,
-      [[data.menteeId, data.mentorId]],
-    );
+    return withSpan("BookingsService.createBooking", async () => {
+      const client = await db.connect();
+      try {
+        await client.query("BEGIN");
 
-    const mentee = users.find((u: any) => u.id === data.menteeId);
-    const mentor = users.find((u: any) => u.id === data.mentorId);
+        // Key lock on mentor ID + date truncated to the hour
+        const dateHour = new Date(data.scheduledAt);
+        dateHour.setMinutes(0, 0, 0);
+        const lockKey = `${data.mentorId}:${dateHour.toISOString()}`;
 
-    if (!mentee) {
-      throw createError(ErrorCode.BOOKING_MENTEE_NOT_FOUND, 404);
-    }
-    if (!mentor) {
-      throw createError(ErrorCode.BOOKING_MENTOR_NOT_FOUND, 404);
-    }
+        // Attempt to acquire advisory lock for up to 5 seconds
+        let acquired = false;
+        const startTime = Date.now();
+        while (Date.now() - startTime < 5000) {
+          const { rows } = await client.query(
+            "SELECT pg_try_advisory_xact_lock(hashtext($1)) as locked",
+            [lockKey],
+          );
+          if (rows[0].locked) {
+            acquired = true;
+            break;
+          }
+          await new Promise((resolve) => setTimeout(resolve, 100));
+        }
 
-    // Prevent suspended or banned users from booking
-    if (mentee.status === "suspended") {
-      throw createError(ErrorCode.BOOKING_USER_SUSPENDED, 403);
-    }
-    if (mentee.status === "banned") {
-      throw createError(ErrorCode.BOOKING_USER_BANNED, 403);
-    }
-    if (mentor.status === "suspended" || mentor.status === "banned") {
-      throw createError(ErrorCode.MENTOR_NOT_AVAILABLE, 400);
-    }
+        if (!acquired) {
+          throw createError(ErrorCode.BOOKING_CONFLICT, 409);
+        }
 
-    if (mentor.role !== "mentor") {
-      throw createError(ErrorCode.BOOKING_USER_NOT_A_MENTOR, 400);
-    }
+        // Batch-validate both users in a single query (avoids N+1)
+        const { rows: users } = await client.query( // use the locked client here instead of db
+          `SELECT id, role, status FROM users WHERE id = ANY($1) AND is_active = true`,
+          [[data.menteeId, data.mentorId]],
+        );
 
-    // Check for booking conflicts
-    const hasConflict = await BookingModel.checkConflict(
-      data.mentorId,
-      data.scheduledAt,
-      data.durationMinutes,
-    );
+        const mentee = users.find((u: any) => u.id === data.menteeId);
+        const mentor = users.find((u: any) => u.id === data.mentorId);
 
-    if (hasConflict) {
-      throw createError(ErrorCode.BOOKING_CONFLICT, 409);
-    }
+        if (!mentee) {
+          throw createError(ErrorCode.BOOKING_MENTEE_NOT_FOUND, 404);
+        }
+        if (!mentor) {
+          throw createError(ErrorCode.BOOKING_MENTOR_NOT_FOUND, 404);
+        }
 
-    // Calculate amount from mentor profile
-    const mentorProfile = await MentorsService.findById(data.mentorId);
-    if (!mentorProfile || mentorProfile.hourly_rate === null) {
-      throw createError(ErrorCode.BOOKING_MENTOR_PROFILE_NOT_FOUND, 404);
-    }
-    const hourlyRate = mentorProfile.hourly_rate;
-    const amount = ((data.durationMinutes / 60) * hourlyRate).toFixed(7);
+        // Prevent suspended or banned users from booking
+        if (mentee.status === "suspended") {
+          throw createError(ErrorCode.BOOKING_USER_SUSPENDED, 403);
+        }
+        if (mentee.status === "banned") {
+          throw createError(ErrorCode.BOOKING_USER_BANNED, 403);
+        }
+        if (mentor.status === "suspended" || mentor.status === "banned") {
+          throw createError(ErrorCode.MENTOR_NOT_AVAILABLE, 400);
+        }
 
-    // Best-effort USD equivalent (oracle preferred, SDEX fallback via
-    // AssetExchangeService). Never blocks booking creation on failure.
-    let usdEquivalent: string | null = null;
-    try {
-      const rate = await AssetExchangeService.getRate("XLM", "USDC");
-      usdEquivalent = (parseFloat(amount) * parseFloat(rate.rate)).toFixed(2);
-    } catch (error) {
-      logger.warn("Failed to compute USD equivalent for booking amount", {
-        mentorId: data.mentorId,
-        error: error instanceof Error ? error.message : error,
-      });
-    }
+        if (mentor.role !== "mentor") {
+          throw createError(ErrorCode.BOOKING_USER_NOT_A_MENTOR, 400);
+        }
 
-    // Create booking
-    const booking = await BookingModel.create({
-      menteeId: data.menteeId,
-      mentorId: data.mentorId,
-      scheduledAt: data.scheduledAt,
-      durationMinutes: data.durationMinutes,
-      topic: data.topic,
-      notes: data.notes,
-      amount,
-      currency: "XLM",
-      usdEquivalent,
-    });
+        // Check for booking conflicts
+        const hasConflict = await BookingModel.checkConflict(
+          data.mentorId,
+          data.scheduledAt,
+          data.durationMinutes,
+        );
 
-    // Dual-write: domain event alongside direct DB write (migration period)
-    await publishBookingDomainEvent(
-      booking.id,
-      BookingProjectionEventType.BookingCreated,
-      {
-        menteeId: booking.mentee_id,
-        mentorId: booking.mentor_id,
-        scheduledAt: booking.scheduled_at,
-        durationMinutes: booking.duration_minutes,
-        topic: booking.topic,
-        notes: booking.notes,
-        amount: booking.amount,
-        currency: booking.currency,
-        status: booking.status,
-        paymentStatus: booking.payment_status,
-      },
-      data.menteeId,
-    );
+        if (hasConflict) {
+          throw createError(ErrorCode.BOOKING_CONFLICT, 409);
+        }
 
-    return booking;
+        // Calculate amount from mentor profile
+        const mentorProfile = await MentorsService.findById(data.mentorId);
+        if (!mentorProfile || mentorProfile.hourly_rate === null) {
+          throw createError(ErrorCode.BOOKING_MENTOR_PROFILE_NOT_FOUND, 404);
+        }
+        const hourlyRate = mentorProfile.hourly_rate;
+        const amount = ((data.durationMinutes / 60) * hourlyRate).toFixed(7);
+
+        // Best-effort USD equivalent (oracle preferred, SDEX fallback via
+        // AssetExchangeService). Never blocks booking creation on failure.
+        let usdEquivalent: string | null = null;
+        try {
+          const rate = await AssetExchangeService.getRate("XLM", "USDC");
+          usdEquivalent = (parseFloat(amount) * parseFloat(rate.rate)).toFixed(2);
+        } catch (error) {
+          logger.warn("Failed to compute USD equivalent for booking amount", {
+            mentorId: data.mentorId,
+            error: error instanceof Error ? error.message : error,
+          });
+        }
+
+        // Create booking
+        const booking = await BookingModel.create({
+          menteeId: data.menteeId,
+          mentorId: data.mentorId,
+          scheduledAt: data.scheduledAt,
+          durationMinutes: data.durationMinutes,
+          topic: data.topic,
+          notes: data.notes,
+          amount,
+          currency: "XLM",
+          usdEquivalent,
+        });
+
+        // Dual-write: domain event alongside direct DB write (migration period)
+        await publishBookingDomainEvent(
+          booking.id,
+          BookingProjectionEventType.BookingCreated,
+          {
+            menteeId: booking.mentee_id,
+            mentorId: booking.mentor_id,
+            scheduledAt: booking.scheduled_at,
+            durationMinutes: booking.duration_minutes,
+            topic: booking.topic,
+            notes: booking.notes,
+            amount: booking.amount,
+            currency: booking.currency,
+            status: booking.status,
+            paymentStatus: booking.payment_status,
+          },
+          data.menteeId,
+        );
+
+        await client.query("COMMIT");
+        return booking;
+      } catch (error) {
+        await client.query("ROLLBACK");
+        throw error;
+      } finally {
+        client.release();
+      }
+    }, { menteeId: data.menteeId, mentorId: data.mentorId });
   },
 
   async getBookingById(
@@ -238,6 +287,13 @@ export const BookingsService = {
     }
 
     return booking;
+  },
+
+  async listBookings(
+    userId: string,
+    filters?: { status?: string; cursor?: string; page?: number; limit?: number },
+  ): Promise<{ bookings: BookingRecord[]; total: number }> {
+    return this.getUserBookings(userId, filters);
   },
 
   async getUserBookings(
@@ -471,12 +527,13 @@ export const BookingsService = {
       throw createError(ErrorCode.BOOKING_NOT_CONFIRMED, 400);
     }
 
-    // Verify session time has passed
+    // Verify session time has passed or both participants have joined
     const sessionEnd = calculateEndTime(
       booking.scheduled_at,
       booking.duration_minutes,
     );
-    if (sessionEnd > new Date()) {
+    const bothJoined = !!(booking.mentor_joined_at && booking.mentee_joined_at);
+    if (sessionEnd > new Date() && !bothJoined) {
       throw createError(ErrorCode.BOOKING_SESSION_NOT_ENDED, 400);
     }
 
@@ -851,6 +908,195 @@ export const BookingsService = {
 
     if (!updated) {
       throw createError(ErrorCode.PAYMENT_CONFIRM_FAILED, 500);
+    }
+
+    return updated;
+  },
+
+  /**
+   * Dispute a recorded no-show within the configured dispute window (default 24h).
+   * Only the offender for this booking may dispute, and only while the dispute
+   * deadline has not elapsed.
+   */
+  async disputeNoShow(
+    bookingId: string,
+    userId: string,
+    reason: string,
+  ): Promise<BookingRecord> {
+    const { rows } = await db.query(
+      `SELECT id, status, no_show_offender_role, no_show_dispute_status,
+              no_show_dispute_deadline, mentor_id, mentee_id, no_show_penalty_points
+       FROM bookings WHERE id = $1`,
+      [bookingId],
+    );
+
+    const booking = rows[0] as {
+      id: string;
+      status: string;
+      no_show_offender_role: "mentor" | "mentee" | null;
+      no_show_dispute_status: "none" | "pending" | "approved" | "dismissed";
+      no_show_dispute_deadline: Date | null;
+      mentor_id: string;
+      mentee_id: string;
+      no_show_penalty_points: number;
+    };
+
+    if (!booking) {
+      throw createError(ErrorCode.BOOKING_NOT_FOUND, 404);
+    }
+
+    if (booking.status !== "no_show") {
+      throw createError(ErrorCode.BOOKING_INVALID_STATUS, 400);
+    }
+
+    if (!booking.no_show_offender_role || !booking.no_show_dispute_deadline) {
+      throw createError(ErrorCode.BOOKING_INVALID_STATUS, 400);
+    }
+
+    // Only the offender can dispute the no-show marking.
+    const offenderUserId =
+      booking.no_show_offender_role === "mentor"
+        ? booking.mentor_id
+        : booking.mentee_id;
+    if (userId !== offenderUserId) {
+      throw createError(ErrorCode.AUTHZ_FORBIDDEN, 403);
+    }
+
+    // Dispute window must still be open.
+    if (new Date(booking.no_show_dispute_deadline).getTime() < Date.now()) {
+      throw createError(ErrorCode.BOOKING_INVALID_STATUS, 400);
+    }
+
+    // Must not already be in a pending/resolved dispute.
+    if (booking.no_show_dispute_status !== "none") {
+      throw createError(ErrorCode.BOOKING_INVALID_STATUS, 400);
+    }
+
+    const updated = await BookingModel.update(bookingId, {
+      noShowDisputeStatus: "pending",
+      noShowDisputedAt: new Date(),
+      noShowDisputeReason: reason,
+    });
+
+    if (!updated) {
+      throw createError(ErrorCode.BOOKING_UPDATE_FAILED, 500);
+    }
+
+    // Reflect the pending dispute on the in-app notification + audit trail.
+    try {
+      await NotificationService.sendNotification({
+        userId: offenderUserId,
+        type: NotificationType.NO_SHOW_DISPUTE,
+        title: "No-Show Dispute Submitted",
+        message: `Your dispute for booking ${bookingId} has been received and is pending review.`,
+        channels: [NotificationChannel.EMAIL, NotificationChannel.IN_APP],
+        priority: NotificationPriority.NORMAL,
+        data: { bookingId, reason },
+      });
+    } catch (notificationError) {
+      logger.warn("Dispute confirmation notification failed", {
+        bookingId,
+        error:
+          notificationError instanceof Error
+            ? notificationError.message
+            : notificationError,
+      });
+    }
+
+    await publishBookingDomainEvent(
+      bookingId,
+      BookingProjectionEventType.BookingStatusChanged,
+      {
+        previousStatus: "no_show",
+        status: "no_show",
+        disputeStatus: "pending",
+      },
+      userId,
+    );
+
+    return updated;
+  },
+
+  /**
+   * Resolve a pending no-show dispute. On approval the penalty strike is wiped
+   * and the offender's penalty points are refunded; on dismissal the penalty
+   * stands.
+   */
+  async resolveNoShowDispute(
+    bookingId: string,
+    adminUserId: string,
+    decision: "approved" | "dismissed",
+    resolutionNote?: string,
+  ): Promise<BookingRecord> {
+    const { rows } = await db.query(
+      `SELECT id, status, no_show_offender_role, no_show_dispute_status,
+              no_show_penalty_points, mentor_id, mentee_id
+       FROM bookings WHERE id = $1`,
+      [bookingId],
+    );
+
+    const booking = rows[0] as {
+      id: string;
+      status: string;
+      no_show_offender_role: "mentor" | "mentee" | null;
+      no_show_dispute_status: "none" | "pending" | "approved" | "dismissed";
+      no_show_penalty_points: number;
+      mentor_id: string;
+      mentee_id: string;
+    };
+
+    if (!booking) {
+      throw createError(ErrorCode.BOOKING_NOT_FOUND, 404);
+    }
+
+    if (booking.status !== "no_show" || booking.no_show_dispute_status !== "pending") {
+      throw createError(ErrorCode.BOOKING_INVALID_STATUS, 400);
+    }
+
+    const offenderId =
+      booking.no_show_offender_role === "mentor"
+        ? booking.mentor_id
+        : booking.mentee_id;
+
+    const updated = await BookingModel.update(bookingId, {
+      noShowDisputeStatus: decision,
+      noShowDisputeReason: resolutionNote,
+    });
+
+    if (!updated) {
+      throw createError(ErrorCode.BOOKING_UPDATE_FAILED, 500);
+    }
+
+    // Update the penalty ledger + user aggregates based on the decision.
+    try {
+      if (decision === "approved") {
+        // Wipe the strike and refund the penalty points.
+        await db.query(
+          `UPDATE no_show_penalties
+           SET status = 'waived', resolution = $1, resolved_by = $2, resolved_at = NOW()
+           WHERE booking_id = $3`,
+          [resolutionNote || "approved", adminUserId, bookingId],
+        );
+        await db.query(
+          `UPDATE users
+           SET active_penalty_points = GREATEST(0, active_penalty_points - $1)
+           WHERE id = $2`,
+          [booking.no_show_penalty_points, offenderId],
+        );
+      } else {
+        await db.query(
+          `UPDATE no_show_penalties
+           SET status = 'served', resolution = $1, resolved_by = $2, resolved_at = NOW()
+           WHERE booking_id = $3`,
+          [resolutionNote || "dismissed", adminUserId, bookingId],
+        );
+      }
+    } catch (penaltyError) {
+      logger.warn("Failed to update no-show penalty on dispute resolution", {
+        bookingId,
+        error:
+          penaltyError instanceof Error ? penaltyError.message : penaltyError,
+      });
     }
 
     return updated;

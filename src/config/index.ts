@@ -13,6 +13,7 @@ const config = {
   server: {
     port: parseInt(env.PORT, 10),
     apiVersion: env.API_VERSION,
+    timeoutMs: parseInt(env.REQUEST_TIMEOUT_MS, 10),
   },
 
   db: {
@@ -96,6 +97,7 @@ const config = {
 
   security: {
     bcryptRounds: parseInt(env.BCRYPT_ROUNDS, 10),
+    hstsMaxAge: Math.max(parseInt(env.HSTS_MAX_AGE, 10), 31_536_000),
   },
 
   platform: {

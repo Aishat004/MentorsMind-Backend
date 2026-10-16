@@ -19,7 +19,7 @@ export interface BookingRecord {
   amount: string;
   currency: string;
   usd_equivalent: string | null;
-  payment_status: "pending" | "paid" | "refunded" | "failed";
+  payment_status: "pending" | "paid" | "partially_refunded" | "refunded" | "failed";
   stellar_tx_hash: string | null;
   transaction_id: string | null;
   cancellation_reason: string | null;
@@ -30,6 +30,12 @@ export interface BookingRecord {
   mentee_joined_at: Date | null;
   no_show_detected_at: Date | null;
   no_show_refund_tx_hash: string | null;
+  no_show_offender_role: "mentor" | "mentee" | null;
+  no_show_dispute_deadline: Date | null;
+  no_show_disputed_at: Date | null;
+  no_show_dispute_status: "none" | "pending" | "approved" | "dismissed";
+  no_show_dispute_reason: string | null;
+  no_show_penalty_points: number;
   created_at: Date;
   updated_at: Date;
 }
@@ -87,6 +93,17 @@ export const BookingModel = {
       limit?: number;
     },
   ): Promise<{ bookings: BookingRecord[]; total: number }> {
+    return this.findByUser(userId, filters);
+  },
+
+  async findByUser(
+    userId: string,
+    filters?: {
+      status?: string;
+      page?: number;
+      limit?: number;
+    },
+  ): Promise<{ bookings: BookingRecord[]; total: number }> {
     const page = filters?.page || 1;
     const limit = filters?.limit || 10;
     const offset = (page - 1) * limit;
@@ -101,29 +118,38 @@ export const BookingModel = {
       paramIndex++;
     }
 
-    // Apply tenant filter on top of the existing WHERE clause
+    // Apply tenant filter on top of the existing WHERE clause with COUNT(*) OVER()
     const { query: baseQuery, params: filteredParams } = withCurrentTenantFilter(
-      `SELECT * FROM bookings WHERE ${whereClause}`,
+      `SELECT *, COUNT(*) OVER() AS total_count FROM bookings WHERE ${whereClause}`,
       baseParams,
     );
     const finalParamIndex = filteredParams.length + 1;
 
-    const { query: countQuery, params: countParams } = withCurrentTenantFilter(
-      `SELECT COUNT(*) FROM bookings WHERE ${whereClause}`,
-      baseParams,
+    const dataResult = await db.query(
+      `${baseQuery} ORDER BY scheduled_at DESC LIMIT $${finalParamIndex} OFFSET $${finalParamIndex + 1}`,
+      [...filteredParams, limit, offset],
     );
 
-    const [dataResult, countResult] = await Promise.all([
-      db.query(
-        `${baseQuery} ORDER BY scheduled_at DESC LIMIT $${finalParamIndex} OFFSET $${finalParamIndex + 1}`,
-        [...filteredParams, limit, offset],
-      ),
-      db.query(countQuery, countParams),
-    ]);
+    let total = 0;
+    if (dataResult.rows.length > 0) {
+      total = Number(dataResult.rows[0].total_count) || 0;
+    } else if (offset > 0) {
+      const { query: countQuery, params: countParams } = withCurrentTenantFilter(
+        `SELECT COUNT(*) FROM bookings WHERE ${whereClause}`,
+        baseParams,
+      );
+      const countResult = await db.query(countQuery, countParams);
+      total = Number(countResult.rows[0]?.count) || 0;
+    }
+
+    const bookings: BookingRecord[] = dataResult.rows.map((row: any) => {
+      const { total_count, ...record } = row;
+      return record as BookingRecord;
+    });
 
     return {
-      bookings: dataResult.rows,
-      total: parseInt(countResult.rows[0].count, 10),
+      bookings,
+      total,
     };
   },
 
@@ -152,6 +178,9 @@ export const BookingModel = {
       stellarTxHash: string;
       transactionId: string;
       cancellationReason: string;
+      noShowDisputeStatus: string;
+      noShowDisputedAt: Date;
+      noShowDisputeReason: string | null;
     }>,
   ): Promise<BookingRecord | null> {
     const fields: string[] = [];
@@ -193,6 +222,18 @@ export const BookingModel = {
     if (data.cancellationReason !== undefined) {
       fields.push(`cancellation_reason = $${idx++}`);
       values.push(data.cancellationReason);
+    }
+    if (data.noShowDisputeStatus !== undefined) {
+      fields.push(`no_show_dispute_status = $${idx++}`);
+      values.push(data.noShowDisputeStatus);
+    }
+    if (data.noShowDisputedAt !== undefined) {
+      fields.push(`no_show_disputed_at = $${idx++}`);
+      values.push(data.noShowDisputedAt);
+    }
+    if (data.noShowDisputeReason !== undefined) {
+      fields.push(`no_show_dispute_reason = $${idx++}`);
+      values.push(data.noShowDisputeReason);
     }
 
     if (fields.length === 0) return this.findById(id);
@@ -295,15 +336,22 @@ export const BookingModel = {
     durationMinutes: number,
     excludeBookingId?: string,
   ): Promise<boolean> {
-    const endTime = new Date(scheduledAt.getTime() + durationMinutes * 60000);
+    // Defense-in-depth: never interpolate user-influenced values into SQL.
+    // durationMinutes is validated as an integer and only used via Date math
+    // in JS plus fully-parameterized SQL (make_interval, no string concat).
+    const durationMins = Number(durationMinutes);
+    if (!Number.isInteger(durationMins) || durationMins <= 0) {
+      throw new Error("Invalid durationMinutes: must be a positive integer");
+    }
+    const endTime = new Date(scheduledAt.getTime() + durationMins * 60000);
 
     let baseQuery = `
       SELECT COUNT(*) FROM bookings
       WHERE mentor_id = $1
         AND status NOT IN ('cancelled', 'completed')
         AND (
-          (scheduled_at <= $2 AND scheduled_at + (duration_minutes || ' minutes')::INTERVAL > $2)
-          OR (scheduled_at < $3 AND scheduled_at + (duration_minutes || ' minutes')::INTERVAL >= $3)
+          (scheduled_at <= $2 AND scheduled_at + make_interval(mins => duration_minutes) > $2)
+          OR (scheduled_at < $3 AND scheduled_at + make_interval(mins => duration_minutes) >= $3)
           OR (scheduled_at >= $2 AND scheduled_at < $3)
         )
     `;
