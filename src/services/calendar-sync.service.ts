@@ -100,6 +100,13 @@ export class CalendarSyncService {
     return remoteEvent;
   }
 
+  stopAllSyncs(): void {
+    for (const [userId, interval] of this.syncIntervals) {
+      clearInterval(interval);
+    }
+    this.syncIntervals.clear();
+  }
+
   private async fetchProviderEvents(userId: string): Promise<CalendarEvent[]> {
     // Placeholder implementation
     return [];
