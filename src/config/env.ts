@@ -371,6 +371,28 @@ const envSchema = z.object({
   // When CDN_BASE_URL is set, EmailCDNService uses it; otherwise this provides
   // the fallback absolute URL prefix so email clients always get absolute URLs.
   EMAIL_ASSETS_BASE_URL: z.string().url().optional(),
+}).superRefine((data, ctx) => {
+  if (data.NODE_ENV === 'production' && !data.PII_ENCRYPTION_KEYS) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'PII_ENCRYPTION_KEYS is required when NODE_ENV=production',
+      path: ['PII_ENCRYPTION_KEYS'],
+    });
+  }
+  if (data.NODE_ENV === 'production' && !data.FILE_SIGNING_SECRET) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'FILE_SIGNING_SECRET is required when NODE_ENV=production',
+      path: ['FILE_SIGNING_SECRET'],
+    });
+  }
+  if (data.NODE_ENV === 'production' && !data.CACHE_KEY_HMAC_SECRET) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      message: 'CACHE_KEY_HMAC_SECRET is required when NODE_ENV=production',
+      path: ['CACHE_KEY_HMAC_SECRET'],
+    });
+  }
 });
 
 // ---------------------------------------------------------------------------
