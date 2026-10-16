@@ -30,10 +30,12 @@ export interface RateLimitConfig {
   webhook: RateLimitProfile;
 }
 
+import env from "./env";
+
 const rateLimitsConfig: RateLimitConfig = {
   general: {
-    windowMs: parseInt(process.env.RATE_LIMIT_WINDOW_MS ?? '900000', 10), // 15 min
-    max: parseInt(process.env.RATE_LIMIT_MAX_REQUESTS ?? '100', 10),
+    windowMs: parseInt(env.RATE_LIMIT_WINDOW_MS, 10),
+    max: parseInt(env.RATE_LIMIT_MAX_REQUESTS, 10),
     message: 'Too many requests from this IP, please try again later.',
   },
 

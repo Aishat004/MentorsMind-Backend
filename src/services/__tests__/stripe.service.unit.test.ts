@@ -1,16 +1,28 @@
 import { StripeService } from '../stripe.service';
-import pool from '../../config/database';
 import { BookingModel } from '../../models/booking.model';
+import { EscrowModel } from '../../models/escrow.model';
+import { pool } from '../../config/database';
+import { logger } from '../../utils/logger.utils';
 
 jest.mock('../../config/database', () => ({
   __esModule: true,
   default: {
     query: jest.fn(),
     connect: jest.fn(),
+    release: jest.fn(),
   },
 }));
+jest.mock('../../models/booking.model', () => ({
+  findById: jest.fn(),
+}));
+jest.mock('../../models/escrow.model', () => ({
+  create: jest.fn(),
+}));
+jest.mock('../../utils/logger.utils', () => ({
+  logger: { warn: jest.fn(), error: jest.fn(), info: jest.fn() },
+}));
 
-jest.mock('../../models/booking.model');
+const mockedPoolQuery = pool.query as jest.Mock;
 
 describe('StripeService', () => {
   beforeEach(() => {
@@ -18,91 +30,97 @@ describe('StripeService', () => {
   });
 
   describe('handleEvent', () => {
-    const mockStripeWebhooks = {
-      constructEvent: jest.fn(),
+    const mockEvent = {
+      type: 'payment_intent.succeeded',
+      id: 'evt_123',
+      data: {
+        object: {
+          id: 'pi_456',
+          metadata: {
+            bookingId: 'booking-1',
+            userId: 'user-1',
+          },
+          charges: {
+            data: [{ id: 'ch_789' }],
+          },
+        },
+      },
+    };
+
+    const mockCharge = {
+      id: 'ch_789',
+      amount: 1000,
+      currency: 'usd',
+      metadata: {},
     };
 
     beforeEach(() => {
-      (pool.query as jest.Mock).mockResolvedValue({ rows: [] });
-      (BookingModel.findById as jest.Mock).mockResolvedValue(null);
-    });
-
-    afterEach(() => {
-      delete (pool.query as any).mockStatus;
+      mockedPoolQuery.mockClear();
     });
 
     it('marks booking as paid on payment_intent.succeeded', async () => {
-      // Mock Stripe webhook event construction
-      (StripeService as any).stripe = {
-        webhooks: {
-          constructEvent: mockStripeWebhooks.constructEvent,
-        },
-      } as any;
-
-      const mockEvent = {
-        id: 'evt_123',
-        type: 'payment_intent.succeeded' as const,
-        data: {
-          object: {
-            id: 'pi_123',
-            metadata: { bookingId: 'booking-1', userId: 'user-1' },
-            charges: {
-              data: [{ id: 'ch_123' }],
-            },
-          } as any,
-        },
-      };
-
-      (mockStripeWebhooks.constructEvent as jest.Mock).mockReturnValueOnce(mockEvent);
-      (BookingModel.findById as jest.Mock).mockResolvedValueOnce({
+      // Mock booking lookup
+      ; (BookingModel.findById as jest.Mock).mockResolvedValue({
         id: 'booking-1',
         mentee_id: 'user-1',
-        mentor_id: 'mentor-1',
-        payment_status: 'pending',
+        mentor_id: 'user-2',
       });
 
-      // We can't fully test handleEvent without a running server,
-      // but we verify the event parsing logic works
-      const event = mockEvent;
-      expect(event.type).toBe('payment_intent.succeeded');
-      expect(event.data.object.metadata.bookingId).toBe('booking-1');
-      expect(event.data.object.metadata.userId).toBe('user-1');
+      // Mock escrow creation
+      ; (EscrowModel.create as jest.Mock).mockResolvedValue({ id: 'escrow-1' });
+
+      // Mock INSERT transaction
+      mockedPoolQuery
+        .mockResolvedValueOnce({ rows: [{ id: 'tx-1' }] })
+        // Mock UPDATE booking
+        .mockResolvedValueOnce({ rows: [] })
+        // Mock escrow create inside transaction
+        .mockResolvedValueOnce({ rows: [] })
+        // Mock any additional queries
+        .mockResolvedValueOnce({ rows: [] })
+        .mockResolvedValueOnce({ rows: [] });
+
+      await StripeService.handleEvent(mockEvent as any);
+
+      // Verify booking was marked as paid
+      expect(mockedPoolQuery).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE bookings SET payment_status ='),
+        expect.any(Array)
+      );
     });
 
-    it('handles charge.succeeded event type', async () => {
-      (StripeService as any).stripe = {
-        webhooks: {
-          constructEvent: mockStripeWebhooks.constructEvent,
-        },
-      } as any;
-
-      const mockEvent = {
+    it('ignores payment_intent.payment_failed (no booking update)', async () => {
+      const failedEvent = {
+        type: 'payment_intent.payment_failed',
         id: 'evt_456',
-        type: 'charge.succeeded' as const,
         data: {
           object: {
-            id: 'ch_456',
-            metadata: { bookingId: 'booking-2', userId: 'user-2' },
-          } as any,
+            metadata: {
+              bookingId: 'booking-2',
+              userId: 'user-2',
+            },
+          },
         },
       };
 
-      (mockStripeWebhooks.constructEvent as jest.Mock).mockReturnValueOnce(mockEvent);
-      const event = mockEvent;
-      expect(event.type).toBe('charge.succeeded');
-      expect(event.data.object.metadata.bookingId).toBe('booking-2');
+      await StripeService.handleEvent(failedEvent as any);
+
+      // No UPDATE bookings should occur for unhandled event types
+      const updateCalls = mockedPoolQuery.mock.calls.filter(
+        (call: any) => call[0].includes('UPDATE bookings')
+      );
+      expect(updateCalls.length).toBe(0);
     });
 
-    it('ignores unknown event types gracefully', () => {
+    it('ignores unknown event types gracefully', async () => {
       const unknownEvent = {
-        id: 'evt_unknown',
-        type: 'unknown.event.type' as const,
-        data: { object: {} } as any,
+        type: 'unknown.event.type',
+        id: 'evt_789',
       };
 
-      expect(unknownEvent.type).toBe('unknown.event.type');
-      // Unknown events should not crash - just logged and skipped
-      // The handleEvent method catches and logs errors
+      await expect(
+        StripeService.handleEvent(unknownEvent as any)
+      ).resolves.not.toThrow();
     });
   });
 });
