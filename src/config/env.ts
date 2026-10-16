@@ -114,6 +114,11 @@ const envSchema = z.object({
     .string()
     .regex(/^\d+$/, "STELLAR_REQUEST_TIMEOUT_MS must be a non-negative integer")
     .default("10000"),
+  /** Timeout in ms for server.loadAccount() calls (issue #1191, default 10000) */
+  STELLAR_LOAD_ACCOUNT_TIMEOUT_MS: z
+    .string()
+    .regex(/^\d+$/, "STELLAR_LOAD_ACCOUNT_TIMEOUT_MS must be a non-negative integer")
+    .default("10000"),
 
   // CORS
   CORS_ORIGIN: z
