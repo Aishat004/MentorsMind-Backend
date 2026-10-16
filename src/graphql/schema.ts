@@ -84,6 +84,7 @@ const typeDefs = gql`
     lastName: String!
     bio: String
     avatarUrl: String
+    mfaEnabled: Boolean
     wallet: Wallet
     bookings(
       status: BookingStatus
