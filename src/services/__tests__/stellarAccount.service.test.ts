@@ -39,7 +39,10 @@ jest.mock("../../services/socket.service", () => ({
 // Expose a controllable timeout value so we can exercise the fast-path
 // without waiting real milliseconds.
 jest.mock("../../config/env", () => ({
-  env: { STELLAR_REQUEST_TIMEOUT_MS: "50" }, // 50 ms for tests
+  env: {
+    STELLAR_REQUEST_TIMEOUT_MS: "50", // 50 ms for tests
+    STELLAR_LOAD_ACCOUNT_TIMEOUT_MS: "50",
+  },
 }));
 
 // ── helpers ───────────────────────────────────────────────────────────────────
@@ -85,7 +88,8 @@ describe("StellarAccountService.fundAccount", () => {
     }
 
     assertAppError(caught, ErrorCode.SERVICE_UNAVAILABLE, 503);
-    expect((caught as AppError).details).toEqual({
+    expect((caught as AppError).details).toMatchObject({
+      service: "stellar-funding",
       reason: "Stellar funding account not configured",
     });
   });
