@@ -36,6 +36,7 @@ import { stellarMonitorJob } from "./jobs/stellarMonitor.job";
 import backupJob from "./jobs/backup.job";
 import { goalReminderJob } from "./jobs/goalReminder.job";
 import keyRotationJob from "./jobs/keyRotation.job";
+import baselineRefreshJob from "./jobs/baselineRefresh.job";
 import { runReEncryptionJob } from "./jobs/re-encrypt-pii.job";
 import {
   emailWorker,
@@ -50,6 +51,8 @@ import {
   maintenanceWorker,
   webhookDeliveryWorker,
   transcriptionWorker,
+  onboardingNudgeWorker,
+  taxReportingWorker,
   startScheduler,
   stopScheduler,
   startRetentionEnforcementWorker,
@@ -117,6 +120,7 @@ import("./services/jwks.service").then(({ JwksService }) =>
 
 // Initialize key rotation jobs
 keyRotationJob.initialize();
+baselineRefreshJob.initialize();
 runReEncryptionJob().catch(err => {
   logger.error("Failed to run Google Calendar re-encryption job", { error: err });
 });
@@ -205,6 +209,7 @@ async function shutdown(signal: string) {
   backupJob.stop();
   goalReminderJob.stop();
   keyRotationJob.stop();
+  baselineRefreshJob.stop();
   await Promise.all([
     emailWorker.close(),
     paymentWorker.close(),
@@ -218,6 +223,8 @@ async function shutdown(signal: string) {
     maintenanceWorker.close(),
     webhookDeliveryWorker.close(),
     transcriptionWorker.close(),
+    onboardingNudgeWorker.close(),
+    taxReportingWorker.close(),
     stopScheduler(),
     stopRetentionEnforcementWorker(),
     Promise.resolve(stopPoolMonitor()),
